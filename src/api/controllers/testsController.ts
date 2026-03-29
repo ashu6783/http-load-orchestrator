@@ -25,6 +25,7 @@ export const submitTest = async (req: Request, res: Response) => {
   try {
     const db = getDb();
     const redis = getRedis();
+
     const userId = (req.headers['x-user-id'] as string) || 'anonymous';
 
     const fingerprint = generateFingerprint(userId, {
@@ -47,25 +48,25 @@ export const submitTest = async (req: Request, res: Response) => {
 
     const testId = crypto.randomUUID();
 
-    // Insert test into DB
-    const stmt = db.prepare(`
-      INSERT INTO tests 
+    await db.query(
+      `
+      INSERT INTO tests
         (id, url, method, headers, payload, request_count, concurrency, status, created_at, completed_at, trace_id)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `);
-
-    stmt.run(
-      testId,
-      url,
-      method,
-      headers ? JSON.stringify(headers) : null,
-      payload != null ? JSON.stringify(payload) : null,
-      requestCount,
-      concurrency,
-      'PENDING',
-      new Date().toISOString(),
-      null,
-      traceId
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+    `,
+      [
+        testId,
+        url,
+        method,
+        headers ? JSON.stringify(headers) : null,
+        payload != null ? JSON.stringify(payload) : null,
+        requestCount,
+        concurrency,
+        'PENDING',
+        new Date().toISOString(),
+        null,
+        traceId
+      ]
     );
 
     // Store fingerprint in Redis for idempotency (expires in 60s)
@@ -86,8 +87,8 @@ export const submitTest = async (req: Request, res: Response) => {
 export const getTestById = async (req: Request, res: Response) => {
   try {
     const db = getDb();
-    const testStmt = db.prepare('SELECT * FROM tests WHERE id = ?');
-    const test = testStmt.get(req.params.id) as TestRow | undefined;
+    const { rows } = await db.query('SELECT * FROM tests WHERE id = $1', [req.params.id]);
+    const test = rows[0] as TestRow | undefined;
 
     if (!test) return sendError(res, 404, 'Test not found');
 
@@ -124,23 +125,26 @@ export const getTestById = async (req: Request, res: Response) => {
     }
 
     // COMPLETED: aggregate from metrics
-    const aggStmt = db.prepare(`
+    const aggRes = await db.query(
+      `
       SELECT
-        COUNT(*) as total_requests,
-        SUM(CASE WHEN success = 1 THEN 1 ELSE 0 END) as success_count,
-        SUM(response_ms) as sum_response_ms
+        COUNT(*)::bigint AS total_requests,
+        SUM(CASE WHEN success = 1 THEN 1 ELSE 0 END)::bigint AS success_count,
+        COALESCE(SUM(response_ms), 0)::bigint AS sum_response_ms
       FROM metrics
-      WHERE test_id = ?
-    `);
-    const row = aggStmt.get(test.id) as {
-      total_requests: number;
-      success_count: number;
-      sum_response_ms: number;
+      WHERE test_id = $1
+    `,
+      [test.id]
+    );
+    const row = aggRes.rows[0] as {
+      total_requests: string | null;
+      success_count: string | null;
+      sum_response_ms: string | null;
     };
 
-    const totalRequests = row?.total_requests ?? 0;
-    const successCount = row?.success_count ?? 0;
-    const sumResponseMs = row?.sum_response_ms ?? 0;
+    const totalRequests = Number(row?.total_requests ?? 0);
+    const successCount = Number(row?.success_count ?? 0);
+    const sumResponseMs = Number(row?.sum_response_ms ?? 0);
 
     const metrics = computeAggregatedMetrics(
       totalRequests,
@@ -188,43 +192,46 @@ export const listTests = async (req: Request, res: Response) => {
         t.status,
         t.created_at,
         t.completed_at,
-        COUNT(m.id) as total_requests,
-        SUM(CASE WHEN m.success = 1 THEN 1 ELSE 0 END) as success_count,
-        SUM(m.response_ms) as sum_response_ms
+        COUNT(m.id)::bigint AS total_requests,
+        SUM(CASE WHEN m.success = 1 THEN 1 ELSE 0 END)::bigint AS success_count,
+        COALESCE(SUM(m.response_ms), 0)::bigint AS sum_response_ms
       FROM tests t
       LEFT JOIN metrics m ON m.test_id = t.id
       WHERE 1=1
     `;
     const params: (string | number)[] = [];
+    let p = 1;
 
     if (method && typeof method === 'string') {
-      query += ' AND t.method = ?';
+      query += ` AND t.method = $${p++}`;
       params.push(method);
     }
     if (url && typeof url === 'string') {
-      query += ' AND t.url = ?';
+      query += ` AND t.url = $${p++}`;
       params.push(url);
     }
 
-    query += ' GROUP BY t.id';
+    query += `
+      GROUP BY t.id, t.url, t.method, t.status, t.created_at, t.completed_at
+    `;
 
-    const stmt = db.prepare(query);
-    const rows = stmt.all(...params) as Array<{
+    const listRes = await db.query(query, params);
+    const rows = listRes.rows as Array<{
       id: string;
       url: string;
       method: string;
       status: string;
       created_at: string;
       completed_at: string | null;
-      total_requests: number;
-      success_count: number;
-      sum_response_ms: number;
+      total_requests: string | null;
+      success_count: string | null;
+      sum_response_ms: string | null;
     }>;
 
     let list = rows.map((t) => {
-      const totalRequests = t.total_requests ?? 0;
-      const successCount = t.success_count ?? 0;
-      const sumResponseMs = t.sum_response_ms ?? 0;
+      const totalRequests = Number(t.total_requests ?? 0);
+      const successCount = Number(t.success_count ?? 0);
+      const sumResponseMs = Number(t.sum_response_ms ?? 0);
       const agg = computeAggregatedMetrics(
         totalRequests,
         successCount,

@@ -1,19 +1,26 @@
-import Database from 'better-sqlite3';
-import path from 'path';
+import { Pool, PoolConfig } from 'pg';
 
-let db: Database.Database;
+let pool: Pool | null = null;
 
-export const initDb = () => {
-  if (db) return db;
+function buildPoolConfig(): PoolConfig {
+  if (process.env.DATABASE_URL) {
+    return { connectionString: process.env.DATABASE_URL };
+  }
+  return {
+    host: process.env.POSTGRES_HOST || 'localhost',
+    port: parseInt(process.env.POSTGRES_PORT || '5432', 10),
+    user: process.env.POSTGRES_USER || 'postgres',
+    password: process.env.POSTGRES_PASSWORD || 'postgres',
+    database: process.env.POSTGRES_DB || 'loadtests',
+  };
+}
 
-  const dbPath =
-    process.env.SQLITE_FILE ||
-    path.join(__dirname, '../../data/loadtests.db'); // fallback for local
+export async function initDb(): Promise<Pool> {
+  if (pool) return pool;
 
-  db = new Database(dbPath);
+  pool = new Pool(buildPoolConfig());
 
-  // Create tables if not exist
-  db.prepare(`
+  await pool.query(`
     CREATE TABLE IF NOT EXISTS tests (
       id TEXT PRIMARY KEY,
       url TEXT,
@@ -27,9 +34,9 @@ export const initDb = () => {
       completed_at TEXT,
       trace_id TEXT
     )
-  `).run();
+  `);
 
-  db.prepare(`
+  await pool.query(`
     CREATE TABLE IF NOT EXISTS metrics (
       id TEXT PRIMARY KEY,
       test_id TEXT,
@@ -39,25 +46,28 @@ export const initDb = () => {
       error_msg TEXT,
       timestamp TEXT
     )
-  `).run();
+  `);
 
-  try {
-    db.prepare('ALTER TABLE tests ADD COLUMN last_checkpoint_at TEXT').run();
-  } catch {
-    // Column already exists
-  }
-  try {
-    db.prepare('ALTER TABLE tests ADD COLUMN completed_requests INTEGER').run();
-  } catch {
-    // Column already exists
-  }
+  await pool.query(`
+    ALTER TABLE tests ADD COLUMN IF NOT EXISTS last_checkpoint_at TEXT
+  `);
+  await pool.query(`
+    ALTER TABLE tests ADD COLUMN IF NOT EXISTS completed_requests INTEGER
+  `);
 
-  return db;
-};
+  return pool;
+}
 
-export const getDb = () => {
-  if (!db) {
+export function getDb(): Pool {
+  if (!pool) {
     throw new Error('DB not initialized. Call initDb() first.');
   }
-  return db;
-};
+  return pool;
+}
+
+export async function closeDb(): Promise<void> {
+  if (pool) {
+    await pool.end();
+    pool = null;
+  }
+}

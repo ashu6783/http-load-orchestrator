@@ -42,9 +42,8 @@ export async function recoverOrphanedTestsIfSafe(): Promise<void> {
 
   const db = getDb();
 
-  const orphanedTests = db
-    .prepare("SELECT id FROM tests WHERE status = 'RUNNING'")
-    .all() as { id: string }[];
+  const { rows } = await db.query("SELECT id FROM tests WHERE status = 'RUNNING'");
+  const orphanedTests = rows as { id: string }[];
 
   for (const t of orphanedTests) {
         await getTestQueue().add('load-test', { testId: t.id });

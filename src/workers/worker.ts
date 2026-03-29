@@ -1,9 +1,10 @@
 import { Worker, Job } from 'bullmq';
 import crypto from 'crypto';
 import qs from 'qs';
+import { Pool } from 'pg';
 
 import { initRedis, getRedis } from '../infra/redis';
-import { initDb, getDb } from '../infra/db';
+import { initDb, getDb, closeDb } from '../infra/db';
 import { axiosInstance } from '../utils/axios';
 import { safeParseJson } from '../utils/json';
 import { recoverOrphanedTestsIfSafe } from '../utils/recovery';
@@ -23,32 +24,47 @@ interface LoadTestJob {
   traceId?: string;
 }
 
+async function writeMetricsForSlice(
+  db: Pool,
+  testId: string,
+  slice: { status: number; ms: number; success: boolean }[]
+) {
+  if (slice.length === 0) return;
+  const client = await db.connect();
+  try {
+    await client.query('BEGIN');
+    for (const r of slice) {
+      await client.query(
+        `INSERT INTO metrics
+         (id, test_id, status_code, response_ms, success, error_msg, timestamp)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+        [
+          crypto.randomUUID(),
+          testId,
+          r.status,
+          r.ms,
+          r.success ? 1 : 0,
+          r.success ? null : 'Request failed',
+          new Date().toISOString()
+        ]
+      );
+    }
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
 async function runWorker() {
-  initDb();
+  await initDb();
   initRedis();
 
   const redis = getRedis();
   redisConnection = redis;
   const db = getDb();
-
-  const getTestStmt = db.prepare('SELECT * FROM tests WHERE id = ?');
-  const markRunningStmt = db.prepare(
-    'UPDATE tests SET status = ? WHERE id = ?'
-  );
-  const markCompletedStmt = db.prepare(
-    'UPDATE tests SET status = ?, completed_at = ? WHERE id = ?'
-  );
-  const markFailedStmt = db.prepare(
-    'UPDATE tests SET status = ?, completed_at = ? WHERE id = ?'
-  );
-  const updateCheckpointStmt = db.prepare(
-    'UPDATE tests SET last_checkpoint_at = ?, completed_requests = ? WHERE id = ?'
-  );
-  const insertMetricStmt = db.prepare(
-    `INSERT INTO metrics
-   (id, test_id, status_code, response_ms, success, error_msg, timestamp)
-   VALUES (?, ?, ?, ?, ?, ?, ?)`
-  );
 
   const worker = new Worker(
     'loadTests',
@@ -56,7 +72,8 @@ async function runWorker() {
       const { testId, traceId = '' } = job.data;
       const PROGRESS_KEY = `test:${testId}:progress`;
 
-      const test = getTestStmt.get(testId) as TestRow | undefined;
+      const testRes = await db.query('SELECT * FROM tests WHERE id = $1', [testId]);
+      const test = testRes.rows[0] as TestRow | undefined;
       if (!test) {
         throw new Error(`Test ${testId} not found`);
       }
@@ -66,7 +83,11 @@ async function runWorker() {
         const lastCheckpointMs = new Date(test.last_checkpoint_at).getTime();
         if (Date.now() - lastCheckpointMs > STALENESS_MS) {
           const now = new Date().toISOString();
-          markFailedStmt.run('FAILED', now, testId);
+          await db.query('UPDATE tests SET status = $1, completed_at = $2 WHERE id = $3', [
+            'FAILED',
+            now,
+            testId
+          ]);
           try {
             await redis.del(PROGRESS_KEY);
           } catch {
@@ -93,7 +114,11 @@ async function runWorker() {
 
       if (startOffset >= test.request_count) {
         const now = new Date().toISOString();
-        markCompletedStmt.run('COMPLETED', now, testId);
+        await db.query('UPDATE tests SET status = $1, completed_at = $2 WHERE id = $3', [
+          'COMPLETED',
+          now,
+          testId
+        ]);
         try {
           await redis.del(PROGRESS_KEY);
         } catch {
@@ -104,7 +129,7 @@ async function runWorker() {
       }
 
       console.log(`[traceId=${traceId}] Job started testId=${testId} startOffset=${startOffset}`);
-      markRunningStmt.run('RUNNING', testId);
+      await db.query('UPDATE tests SET status = $1 WHERE id = $2', ['RUNNING', testId]);
 
       const headers = safeParseJson<Record<string, string>>(test.headers, {});
       const payload = safeParseJson<any>(test.payload, null);
@@ -133,25 +158,6 @@ async function runWorker() {
       let lastWrittenMetricIndex = 0;
       let inFlight: Promise<void>[] = [];
 
-      const writeMetricsForSlice = (from: number, to: number) => {
-        if (from >= to) return;
-        const slice = responses.slice(from, to);
-        const insertTx = db.transaction(() => {
-          for (const r of slice) {
-            insertMetricStmt.run(
-              crypto.randomUUID(),
-              testId,
-              r.status,
-              r.ms,
-              r.success ? 1 : 0,
-              r.success ? null : 'Request failed',
-              new Date().toISOString()
-            );
-          }
-        });
-        insertTx();
-      };
-
       const checkpoint = async (totalCompleted: number, totalFailed: number) => {
         const now = new Date().toISOString();
         try {
@@ -164,7 +170,11 @@ async function runWorker() {
         } catch (err) {
           console.warn(`[traceId=${traceId}] Failed to update Redis progress testId=${testId}`, err);
         }
-        updateCheckpointStmt.run(now, totalCompleted, testId);
+        await db.query('UPDATE tests SET last_checkpoint_at = $1, completed_requests = $2 WHERE id = $3', [
+          now,
+          totalCompleted,
+          testId
+        ]);
       };
 
       for (let i = startOffset; i < test.request_count; i++) {
@@ -202,7 +212,7 @@ async function runWorker() {
         const totalCompleted = startOffset + responses.length;
         const totalFailed = responses.filter((r) => !r.success).length;
         if (responses.length - lastWrittenMetricIndex >= test.concurrency) {
-          writeMetricsForSlice(lastWrittenMetricIndex, responses.length);
+          await writeMetricsForSlice(db, testId, responses.slice(lastWrittenMetricIndex, responses.length));
           lastWrittenMetricIndex = responses.length;
           await checkpoint(totalCompleted, totalFailed);
         }
@@ -213,12 +223,16 @@ async function runWorker() {
       const totalCompleted = startOffset + responses.length;
       const totalFailed = responses.filter((r) => !r.success).length;
       if (lastWrittenMetricIndex < responses.length) {
-        writeMetricsForSlice(lastWrittenMetricIndex, responses.length);
+        await writeMetricsForSlice(db, testId, responses.slice(lastWrittenMetricIndex, responses.length));
       }
       await checkpoint(totalCompleted, totalFailed);
 
       const now = new Date().toISOString();
-      markCompletedStmt.run('COMPLETED', now, testId);
+      await db.query('UPDATE tests SET status = $1, completed_at = $2 WHERE id = $3', [
+        'COMPLETED',
+        now,
+        testId
+      ]);
 
       try {
         await redis.del(PROGRESS_KEY);
@@ -232,9 +246,9 @@ async function runWorker() {
     {
       connection: redis,
       concurrency: WORKER_CONCURRENCY,
-      lockDuration: 600_000,   // 10 minutes (load tests can run long)
-      lockRenewTime: 120_000, // renew every 2 minutes
-     }
+      lockDuration: 600_000, // 10 minutes (load tests can run long)
+      lockRenewTime: 120_000 // renew every 2 minutes
+    }
   );
 
   workerInstance = worker;
@@ -261,6 +275,7 @@ async function shutdown(signal: string) {
   try {
     if (workerInstance) await workerInstance.close();
     if (redisConnection) await redisConnection.quit();
+    await closeDb();
     process.exit(0);
   } catch (err) {
     console.error('Error during worker shutdown', err);

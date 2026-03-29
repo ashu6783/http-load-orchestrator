@@ -8,6 +8,23 @@ services:
     volumes:
       - redis-data:/data
 
+  postgres:
+    image: postgres:16-alpine
+    container_name: postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: loadtests
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d loadtests"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
   api:
     build: .
     container_name: api
@@ -17,10 +34,10 @@ services:
     env_file:
       - .env
     depends_on:
-      - redis
-    volumes:
-      # - .:/app
-      - sqlite-data:/app/data
+      redis:
+        condition: service_started
+      postgres:
+        condition: service_healthy
     restart: unless-stopped
 
   worker:
@@ -29,15 +46,16 @@ services:
     env_file:
       - .env
     depends_on:
-      - redis
-      - api
-    volumes:
-      # - .:/app
-      - sqlite-data:/app/data
+      redis:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+      api:
+        condition: service_started
     deploy:
       replicas: 2
     restart: unless-stopped
 
 volumes:
   redis-data:
-  sqlite-data:
+  postgres-data:
