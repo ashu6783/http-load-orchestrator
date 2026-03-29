@@ -1,0 +1,42 @@
+{
+  "name": "load-testing-platform",
+  "version": "1.0.0",
+  "description": "Backend implementation for a Load Testing Platform",
+  "keywords": [
+    "loadtest",
+    "load",
+    "concurrency"
+  ],
+  "license": "ISC",
+  "author": "Siddharth Goel",
+  "type": "commonjs",
+  "main": "src/api/server.ts",
+  "scripts": {
+  "dev": "nodemon --exec ts-node src/api/server.ts",
+  "build": "tsc",
+  "start": "node dist/api/server.js",
+  "worker": "node dist/workers/worker.js"
+  },
+  "dependencies": {
+    "axios": "^1.13.4",
+    "axios-retry": "^4.5.0",
+    "better-sqlite3": "^12.6.2",
+    "body-parser": "^2.2.2",
+    "bullmq": "^5.67.2",
+    "dotenv": "^17.2.3",
+    "express": "^5.2.1",
+    "express-rate-limit": "^8.2.1",
+    "ioredis": "^5.9.2",
+    "p-limit": "^7.2.0",
+    "uuid": "^13.0.0",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/express": "^5.0.6",
+    "@types/node": "^25.1.0",
+    "nodemon": "^3.1.11",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.9.3"
+  }
+}

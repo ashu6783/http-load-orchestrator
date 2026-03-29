@@ -1,0 +1,43 @@
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes
+    volumes:
+      - redis-data:/data
+
+  api:
+    build: .
+    container_name: api
+    command: npm run start
+    ports:
+      - "3000:3000"
+    env_file:
+      - .env
+    depends_on:
+      - redis
+    volumes:
+      # - .:/app
+      - sqlite-data:/app/data
+    restart: unless-stopped
+
+  worker:
+    build: .
+    command: npm run worker
+    env_file:
+      - .env
+    depends_on:
+      - redis
+      - api
+    volumes:
+      # - .:/app
+      - sqlite-data:/app/data
+    deploy:
+      replicas: 2
+    restart: unless-stopped
+
+volumes:
+  redis-data:
+  sqlite-data:
