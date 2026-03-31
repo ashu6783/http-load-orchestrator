@@ -3,6 +3,8 @@ export interface AggregatedMetrics {
     successRate: number;
     errorRate: number;
     avgResponseMs: number;
+    p50ResponseMs: number;
+    p95ResponseMs: number;
     throughput: number;
   }
   
@@ -10,6 +12,8 @@ export interface AggregatedMetrics {
     totalRequests: number,
     successCount: number,
     sumResponseMs: number,
+    p50ResponseMs: number,
+    p95ResponseMs: number,
     createdAt: string,
     completedAt: string | null
   ): AggregatedMetrics | null {
@@ -32,6 +36,8 @@ export interface AggregatedMetrics {
       successRate,
       errorRate,
       avgResponseMs,
+      p50ResponseMs: Math.round(p50ResponseMs),
+      p95ResponseMs: Math.round(p95ResponseMs),
       throughput
     };
   }

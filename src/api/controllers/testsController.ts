@@ -130,7 +130,9 @@ export const getTestById = async (req: Request, res: Response) => {
       SELECT
         COUNT(*)::bigint AS total_requests,
         SUM(CASE WHEN success = 1 THEN 1 ELSE 0 END)::bigint AS success_count,
-        COALESCE(SUM(response_ms), 0)::bigint AS sum_response_ms
+        COALESCE(SUM(response_ms), 0)::bigint AS sum_response_ms,
+        COALESCE(PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY response_ms), 0) AS p50_response_ms,
+        COALESCE(PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY response_ms), 0) AS p95_response_ms
       FROM metrics
       WHERE test_id = $1
     `,
@@ -140,16 +142,22 @@ export const getTestById = async (req: Request, res: Response) => {
       total_requests: string | null;
       success_count: string | null;
       sum_response_ms: string | null;
+      p50_response_ms: string | null;
+      p95_response_ms: string | null;
     };
 
     const totalRequests = Number(row?.total_requests ?? 0);
     const successCount = Number(row?.success_count ?? 0);
     const sumResponseMs = Number(row?.sum_response_ms ?? 0);
+    const p50ResponseMs = Number(row?.p50_response_ms ?? 0);
+    const p95ResponseMs = Number(row?.p95_response_ms ?? 0);
 
     const metrics = computeAggregatedMetrics(
       totalRequests,
       successCount,
       sumResponseMs,
+      p50ResponseMs,
+      p95ResponseMs,
       test.created_at,
       test.completed_at
     );
@@ -161,6 +169,8 @@ export const getTestById = async (req: Request, res: Response) => {
         successRate: 0,
         errorRate: 0,
         avgResponseMs: 0,
+        p50ResponseMs: 0,
+        p95ResponseMs: 0,
         throughput: 0
       }
     });
@@ -194,7 +204,9 @@ export const listTests = async (req: Request, res: Response) => {
         t.completed_at,
         COUNT(m.id)::bigint AS total_requests,
         SUM(CASE WHEN m.success = 1 THEN 1 ELSE 0 END)::bigint AS success_count,
-        COALESCE(SUM(m.response_ms), 0)::bigint AS sum_response_ms
+        COALESCE(SUM(m.response_ms), 0)::bigint AS sum_response_ms,
+        COALESCE(PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY m.response_ms), 0) AS p50_response_ms,
+        COALESCE(PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY m.response_ms), 0) AS p95_response_ms
       FROM tests t
       LEFT JOIN metrics m ON m.test_id = t.id
       WHERE 1=1
@@ -226,16 +238,22 @@ export const listTests = async (req: Request, res: Response) => {
       total_requests: string | null;
       success_count: string | null;
       sum_response_ms: string | null;
+      p50_response_ms: string | null;
+      p95_response_ms: string | null;
     }>;
 
     let list = rows.map((t) => {
       const totalRequests = Number(t.total_requests ?? 0);
       const successCount = Number(t.success_count ?? 0);
       const sumResponseMs = Number(t.sum_response_ms ?? 0);
+      const p50ResponseMs = Number(t.p50_response_ms ?? 0);
+      const p95ResponseMs = Number(t.p95_response_ms ?? 0);
       const agg = computeAggregatedMetrics(
         totalRequests,
         successCount,
         sumResponseMs,
+        p50ResponseMs,
+        p95ResponseMs,
         t.created_at,
         t.completed_at
       );
@@ -245,6 +263,8 @@ export const listTests = async (req: Request, res: Response) => {
         method: t.method,
         status: t.status,
         errorRate: agg?.errorRate ?? null,
+        p50ResponseMs: agg?.p50ResponseMs ?? null,
+        p95ResponseMs: agg?.p95ResponseMs ?? null,
         throughput: agg?.throughput ?? null,
         createdAt: t.created_at,
         completedAt: t.completed_at
